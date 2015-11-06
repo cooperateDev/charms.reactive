@@ -53,7 +53,6 @@ def main(relation_name=None):
     hookenv.atexit(flush_kv)
     try:
         bus.discover()
-        hookenv._run_atstart()
         bus.dispatch()
     except SystemExit as x:
         if x.code is None or x.code == 0:
