@@ -36,36 +36,18 @@ def hook(*hook_patterns):
 @cmdline.test_command
 def when(*desired_states):
     """
-    Alias of when_all.
-    """
-    return helpers._when_all(desired_states)
-
-
-@cmdline.subcommand()
-@cmdline.test_command
-def when_all(*desired_states):
-    """
     Check if all of the desired_states are active and have changed.
     """
-    return helpers._when_all(desired_states)
+    return helpers._when(desired_states, False)
 
 
 @cmdline.subcommand()
 @cmdline.test_command
 def when_not(*desired_states):
     """
-    Alias of when_none.
+    Check if not all of the desired_states are active and have changed.
     """
-    return helpers._when_none(desired_states)
-
-
-@cmdline.subcommand()
-@cmdline.test_command
-def when_none(*desired_states):
-    """
-    Check if none of the desired_states are active and have changed.
-    """
-    return helpers._when_none(desired_states)
+    return helpers._when(desired_states, True)
 
 
 @cmdline.subcommand()
