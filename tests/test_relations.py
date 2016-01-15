@@ -223,21 +223,6 @@ class TestConversation(unittest.TestCase):
         ])
         relation_ids.assert_called_once_with('rel')
 
-        # test cache
-        remote_service_name.reset_mock()
-        remote_service_name.side_effect = ['foo', 'bar', 'foo']
-        relation_ids.return_value = ['rel:4', 'rel:5', 'rel:6']
-        self.assertEqual(c1.relation_ids, ['rel:1', 'rel:3'])
-        assert not remote_service_name.called
-
-        hookenv.cache.clear()
-        self.assertEqual(c1.relation_ids, ['rel:4', 'rel:6'])
-        self.assertEqual(remote_service_name.call_args_list, [
-            mock.call('rel:4'),
-            mock.call('rel:5'),
-            mock.call('rel:6'),
-        ])
-
     @mock.patch.object(relations, 'unitdata')
     @mock.patch.object(relations, 'hookenv')
     def test_join(self, hookenv, unitdata):
@@ -332,6 +317,9 @@ class TestConversation(unittest.TestCase):
         conv.set_state('{relation_name}.bar')
         set_state.assert_called_once_with('rel.bar', {'conversations': ['foo', 'reactive.conversations.rel.scope']})
         get_state.assert_called_once_with('rel.bar', {'relation': 'rel', 'conversations': []})
+        conv.set_state('{relation_name}.bar')
+        self.assertEqual(set_state.call_count, 2)
+        set_state.assert_called_with('rel.bar', {'conversations': ['foo', 'reactive.conversations.rel.scope']})
 
     @mock.patch.object(relations, 'remove_state')
     @mock.patch.object(relations, 'set_state')
@@ -357,6 +345,34 @@ class TestConversation(unittest.TestCase):
         conv.remove_state('{relation_name}.bar')
         assert not set_state.called
         remove_state.assert_called_once_with('rel.bar')
+
+    @mock.patch.object(relations, 'get_state')
+    def test_is_state(self, get_state):
+        conv = relations.Conversation('rel', ['service/0', 'service/1'], 'scope')
+        get_state.side_effect = [
+            None,
+            {'conversations': ['foo']},
+            {'conversations': ['reactive.conversations.rel.scope']},
+        ]
+
+        assert not conv.is_state('{relation_name}.bar')
+        assert not conv.is_state('{relation_name}.bar')
+        assert conv.is_state('{relation_name}.bar')
+
+    def test_toggle_state(self):
+        conv = relations.Conversation('rel', ['service/0', 'service/1'], 'scope')
+        conv.is_state = mock.Mock(side_effect=[True, False])
+        conv.set_state = mock.Mock()
+        conv.remove_state = mock.Mock()
+
+        conv.toggle_state('foo')
+        self.assertEqual(conv.remove_state.call_count, 1)
+        conv.toggle_state('foo')
+        self.assertEqual(conv.set_state.call_count, 1)
+        conv.toggle_state('foo', True)
+        self.assertEqual(conv.set_state.call_count, 2)
+        conv.toggle_state('foo', False)
+        self.assertEqual(conv.remove_state.call_count, 2)
 
     @mock.patch.object(relations.hookenv, 'relation_set')
     @mock.patch.object(relations.Conversation, 'relation_ids', ['rel:1', 'rel:2'])
