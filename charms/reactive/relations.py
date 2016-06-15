@@ -16,6 +16,7 @@
 
 import os
 from inspect import isclass
+from subprocess import CalledProcessError
 
 from six import with_metaclass
 
@@ -30,9 +31,7 @@ from charms.reactive.bus import _load_module
 from charms.reactive.bus import StateList
 
 
-# arbitrary obj instances to use as defaults instead of None
-ALL = object()
-TOGGLE = object()
+ALL = '__ALL_SERVICES__'
 
 
 class scopes(object):
@@ -179,7 +178,7 @@ class RelationBase(with_metaclass(AutoAccessors, object)):
     def from_name(cls, relation_name, conversations=None):
         """
         Find relation implementation in the current charm, based on the
-        ID of the relation.
+        name of the relation.
 
         :return: A Relation instance, or None
         """
@@ -298,13 +297,13 @@ class RelationBase(with_metaclass(AutoAccessors, object)):
         """
         return self.conversation(scope).is_state(state)
 
-    def toggle_state(self, state, active=TOGGLE, scope=None):
+    def toggle_state(self, state, active=None, scope=None):
         """
         Toggle the state for the :class:`Conversation` with the given scope.
 
         In Python, this is equivalent to::
 
-            relation.conversation(scope).toggle_state(state, active)
+            relation.conversation(scope).toggle_state(state)
 
         See :meth:`conversation` and :meth:`Conversation.toggle_state`.
         """
@@ -448,9 +447,6 @@ class Conversation(object):
         """
         Remove the current remote unit, for the active hook context, from
         this conversation.  This should be called from a `-departed` hook.
-
-        TODO: Need to figure out a way to have this called implicitly, to
-        ensure cleaning up of conversations that are no longer needed.
         """
         unit = hookenv.remote_unit()
         self.units.remove(unit)
@@ -551,7 +547,7 @@ class Conversation(object):
             return False
         return self.key in value['conversations']
 
-    def toggle_state(self, state, active=TOGGLE):
+    def toggle_state(self, state, active=None):
         """
         Toggle the given state for this conversation.
 
@@ -567,7 +563,7 @@ class Conversation(object):
 
         This will set the state if ``value`` is equal to ``foo``.
         """
-        if active is TOGGLE:
+        if active is None:
             active = not self.is_state(state)
         if active:
             self.set_state(state)
@@ -613,12 +609,21 @@ class Conversation(object):
         value that it finds set by any of its units.
         """
         for relation_id in self.relation_ids:
-            for unit in hookenv.related_units(relation_id):
-                if unit not in self.units:
-                    continue
-                value = hookenv.relation_get(key, unit, relation_id)
-                if value:
-                    return value
+            for unit in self.units:
+                try:
+                    value = hookenv.relation_get(key, unit, relation_id)
+                    if value:
+                        return value
+                except CalledProcessError:
+                    # Our unit list might be inaccurate (perhaps a hook error
+                    # during -relation-departed that was `juju resolved`?) so
+                    # ignore units that fail to return data.  This could mask
+                    # a failure to connect to the state server, but in that
+                    # case, we have bigger problems, and it will at least be
+                    # logged.
+                    hookenv.log('Error getting relation data for {}; ignoring'
+                                '(did unit miss depart?)'.format(unit))
+                    pass
         return default
 
     def set_local(self, key=None, value=None, data=None, **kwdata):
