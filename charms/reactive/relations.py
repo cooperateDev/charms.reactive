@@ -16,7 +16,6 @@
 
 import os
 from inspect import isclass
-from subprocess import CalledProcessError
 
 from six import with_metaclass
 
@@ -31,7 +30,9 @@ from charms.reactive.bus import _load_module
 from charms.reactive.bus import StateList
 
 
-ALL = '__ALL_SERVICES__'
+# arbitrary obj instances to use as defaults instead of None
+ALL = object()
+TOGGLE = object()
 
 
 class scopes(object):
@@ -297,13 +298,13 @@ class RelationBase(with_metaclass(AutoAccessors, object)):
         """
         return self.conversation(scope).is_state(state)
 
-    def toggle_state(self, state, active=None, scope=None):
+    def toggle_state(self, state, active=TOGGLE, scope=None):
         """
         Toggle the state for the :class:`Conversation` with the given scope.
 
         In Python, this is equivalent to::
 
-            relation.conversation(scope).toggle_state(state)
+            relation.conversation(scope).toggle_state(state, active)
 
         See :meth:`conversation` and :meth:`Conversation.toggle_state`.
         """
@@ -547,7 +548,7 @@ class Conversation(object):
             return False
         return self.key in value['conversations']
 
-    def toggle_state(self, state, active=None):
+    def toggle_state(self, state, active=TOGGLE):
         """
         Toggle the given state for this conversation.
 
@@ -563,7 +564,7 @@ class Conversation(object):
 
         This will set the state if ``value`` is equal to ``foo``.
         """
-        if active is None:
+        if active is TOGGLE:
             active = not self.is_state(state)
         if active:
             self.set_state(state)
@@ -608,22 +609,21 @@ class Conversation(object):
         converging to identical data.  Thus, this method returns the first
         value that it finds set by any of its units.
         """
+        cur_rid = hookenv.relation_id()
+        departing = hookenv.hook_name().endswith('-relation-departed')
         for relation_id in self.relation_ids:
-            for unit in self.units:
-                try:
-                    value = hookenv.relation_get(key, unit, relation_id)
-                    if value:
-                        return value
-                except CalledProcessError:
-                    # Our unit list might be inaccurate (perhaps a hook error
-                    # during -relation-departed that was `juju resolved`?) so
-                    # ignore units that fail to return data.  This could mask
-                    # a failure to connect to the state server, but in that
-                    # case, we have bigger problems, and it will at least be
-                    # logged.
-                    hookenv.log('Error getting relation data for {}; ignoring'
-                                '(did unit miss depart?)'.format(unit))
-                    pass
+            units = hookenv.related_units(relation_id)
+            if departing and cur_rid == relation_id:
+                # Work around the fact that Juju 2.0 doesn't include the
+                # departing unit in relation-list during the -departed hook,
+                # by adding it back in ourselves.
+                units.append(hookenv.remote_unit())
+            for unit in units:
+                if unit not in self.units:
+                    continue
+                value = hookenv.relation_get(key, unit, relation_id)
+                if value:
+                    return value
         return default
 
     def set_local(self, key=None, value=None, data=None, **kwdata):
