@@ -1,4 +1,4 @@
-# Copyright 2014-2016 Canonical Limited.
+# Copyright 2014-2015 Canonical Limited.
 #
 # This file is part of charm-helpers.
 #
@@ -15,10 +15,9 @@
 # along with charm-helpers.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
-import sys
 from inspect import isclass
+from subprocess import CalledProcessError
 
-import six
 from six import with_metaclass
 
 from charmhelpers.core import hookenv
@@ -202,24 +201,16 @@ class RelationBase(with_metaclass(AutoAccessors, object)):
     def _find_impl(cls, role, interface):
         """
         Find relation implementation based on its role and interface.
-        """
-        if six.PY2:
-            # Looks for the first file matching:
-            # ``$CHARM_DIR/hooks/relations/{iface}/{provides,requires,peer}.py``
-            hooks_dir = os.path.join(hookenv.charm_dir(), 'hooks')
-            try:
-                filepath = os.path.join(hooks_dir, 'relations',
-                                        interface, role + '.py')
-                module = _load_module('relations', filepath)
-                return cls._find_subclass(module)
-            except ImportError:
-                return None
 
-        # Already discovered and imported.
-        module = 'relations.{}.{}'.format(interface, role)
-        if module in sys.modules:
-            return cls._find_subclass(sys.modules[module])
-        else:
+        Looks for the first file matching:
+        ``$CHARM_DIR/hooks/relations/{interface}/{provides,requires,peer}.py``
+        """
+        hooks_dir = os.path.join(hookenv.charm_dir(), 'hooks')
+        try:
+            filepath = os.path.join(hooks_dir, 'relations', interface, role + '.py')
+            module = _load_module(filepath)
+            return cls._find_subclass(module)
+        except ImportError:
             return None
 
     @classmethod
@@ -619,21 +610,22 @@ class Conversation(object):
         converging to identical data.  Thus, this method returns the first
         value that it finds set by any of its units.
         """
-        cur_rid = hookenv.relation_id()
-        departing = hookenv.hook_name().endswith('-relation-departed')
         for relation_id in self.relation_ids:
-            units = hookenv.related_units(relation_id)
-            if departing and cur_rid == relation_id:
-                # Work around the fact that Juju 2.0 doesn't include the
-                # departing unit in relation-list during the -departed hook,
-                # by adding it back in ourselves.
-                units.append(hookenv.remote_unit())
-            for unit in units:
-                if unit not in self.units:
-                    continue
-                value = hookenv.relation_get(key, unit, relation_id)
-                if value:
-                    return value
+            for unit in self.units:
+                try:
+                    value = hookenv.relation_get(key, unit, relation_id)
+                    if value:
+                        return value
+                except CalledProcessError:
+                    # Our unit list might be inaccurate (perhaps a hook error
+                    # during -relation-departed that was `juju resolved`?) so
+                    # ignore units that fail to return data.  This could mask
+                    # a failure to connect to the state server, but in that
+                    # case, we have bigger problems, and it will at least be
+                    # logged.
+                    hookenv.log('Error getting relation data for {}; ignoring'
+                                '(did unit miss depart?)'.format(unit))
+                    pass
         return default
 
     def set_local(self, key=None, value=None, data=None, **kwdata):

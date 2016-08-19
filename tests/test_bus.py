@@ -1,4 +1,4 @@
-# Copyright 2014-2016 Canonical Limited.
+# Copyright 2014-2015 Canonical Limited.
 #
 # This file is part of charm-helpers.
 #
@@ -15,17 +15,18 @@
 # along with charm-helpers.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import re
 import sys
 import errno
 import shutil
 import tempfile
 import unittest
+import subprocess
+from subprocess import Popen
 from collections import OrderedDict
-from contextlib import contextmanager
 
 import mock
 from nose.plugins.attrib import attr
-import six
 
 from charmhelpers.core import unitdata
 from charms import reactive
@@ -447,23 +448,43 @@ class TestReactiveBus(unittest.TestCase):
         reactive.bus.discover()
         self.assertEqual(len(reactive.bus.Handler.get_handlers()), 8)
 
-        # The path is extended so discovered modules can perform
-        # absolute and relative imports as expected.
-        self.assertListEqual(sys.path[-2:],
-                             [charm_dir(), charm_dir() + '/hooks'])
-        sys.path.pop()  # Repair sys.path
-        sys.path.pop()
-
     @attr('slow')
     @mock.patch.dict('sys.modules')
+    @mock.patch('subprocess.check_call')
+    @mock.patch('subprocess.Popen')
     @mock.patch('charmhelpers.core.hookenv.relation_type')
     @mock.patch('charmhelpers.core.hookenv.hook_name')
     @mock.patch('charmhelpers.core.hookenv.charm_dir')
-    def test_full_stack(self, charm_dir, hook_name, relation_type):
+    def test_full_stack(self, charm_dir, hook_name, relation_type, mPopen, mcheck_call):
         test_dir = os.path.dirname(__file__)
         charm_dir.return_value = os.path.join(test_dir, 'data')
         hook_name.return_value = 'config-changed'
         relation_type.return_value = None
+
+        mPopen.stdout = []
+        mPopen.stderr = []
+
+        def capture_output(proc):
+            stdout, stderr = Popen.communicate(proc)
+            mPopen.stdout.extend((stdout or b'').decode('utf-8').splitlines())
+            mPopen.stderr.extend((stderr or b'').decode('utf-8').splitlines())
+            return stdout, stderr
+
+        def mock_Popen(*args, **kwargs):
+            kwargs['stderr'] = subprocess.PIPE
+            proc = Popen(*args, **kwargs)
+            proc.communicate = lambda: capture_output(proc)
+            return proc
+
+        def mock_check_call(*args, **kwargs):
+            proc = mock_Popen(*args, **kwargs)
+            _, _ = proc.communicate()
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode,
+                                                    args[0])
+
+        mPopen.side_effect = mock_Popen
+        mcheck_call.side_effect = mock_check_call
         with mock.patch.dict(os.environ, {
             'PATH': os.pathsep.join([
                 os.path.dirname(sys.executable),  # for /usr/bin/env python
@@ -476,7 +497,7 @@ class TestReactiveBus(unittest.TestCase):
         }):
             self.assertEqual(len(reactive.bus.Handler.get_handlers()), 0)
             reactive.bus.discover()
-            self.assertEqual(len(reactive.bus.Handler.get_handlers()), 8)
+            self.assertEqual(len(reactive.bus.Handler.get_handlers()), 9)
 
             reactive.set_state('test')
             reactive.set_state('to-remove')
@@ -505,6 +526,22 @@ class TestReactiveBus(unittest.TestCase):
             assert not reactive.helpers.all_states('bash-multi-repeat')
             assert not reactive.helpers.all_states('bash-multi-neg')
             assert not reactive.helpers.all_states('bash-multi-neg2')
+            invoked = ['test_when_not_all', 'test_when_any', 'test_when',
+                       'test_when_not', 'test_multi', 'test_only_once']
+            self.assertEqual(mPopen.stdout, [','.join(invoked)])
+            assert 'Will invoke: %s' % ','.join(invoked) in mPopen.stderr
+            for handler in invoked:
+                assert 'Invoking bash reactive handler: %s' % handler in mPopen.stderr
+            assert '++ charms.reactive set_state bash-when-not-all' in mPopen.stderr
+            bash_debug = False
+            debug_debug = False
+            for line in mPopen.stderr:
+                if re.match(r'\+ REACTIVE_HANDLERS\[\$func]=.*/bash.sh:', line):
+                    bash_debug = True
+                if re.match(r'\+ REACTIVE_HANDLERS\[\$func]=.*/debug.sh:', line):
+                    debug_debug = True
+            assert not bash_debug, 'CHARMS_REACTIVE_TRACE not enabled but has debug output'
+            assert debug_debug, 'CHARMS_REACTIVE_TRACE enabled but missing debug output'
 
             hook_name.return_value = 'test-rel-relation-joined'
             relation_type.return_value = 'test-rel'
@@ -518,26 +555,18 @@ class TestReactiveBus(unittest.TestCase):
             assert reactive.helpers.all_states('bash-when-repeat')
             assert not reactive.helpers.all_states('bash-only-once-repeat')
 
-        # The path is extended so discovered modules can perform
-        # absolute and relative imports as expected.
-        self.assertListEqual(sys.path[-2:],
-                             [charm_dir(), charm_dir() + '/hooks'])
-        sys.path.pop()  # Repair sys.path
-        sys.path.pop()
-
-    @unittest.skipUnless(six.PY2, 'Python2 only')
     @mock.patch.object(reactive.bus, 'sys')
     @mock.patch.object(reactive.bus.os.path, 'realpath')
     @mock.patch.object(reactive.bus, 'load_source')
-    def test_load_module_py2(self, load_source, realpath, sys):
+    def test_load_module(self, load_source, realpath, sys):
         realpath.side_effect = lambda p: os.path.join('real', os.path.basename(p))
         mod1 = mock.Mock(name='mod1', __file__='else/file1.pyc')
         mod2 = mock.Mock(name='mod2', __file__='file2.pyc')
         sys.modules = OrderedDict({'real_file1_py': mod1})
         load_source.return_value = mod2
-        self.assertEqual(reactive.bus._load_module('ign', 'file1.py'), mod1)
-        self.assertEqual(reactive.bus._load_module('ign', 'file2.py'), mod2)
-        self.assertEqual(reactive.bus._load_module('ign', 'file2.py'), mod2)
+        self.assertEqual(reactive.bus._load_module('file1.py'), mod1)
+        self.assertEqual(reactive.bus._load_module('file2.py'), mod2)
+        self.assertEqual(reactive.bus._load_module('file2.py'), mod2)
         load_source.assert_called_once_with('real_file2_py', 'real/file2.py')
         self.assertEqual(realpath.call_args_list, [
             mock.call('file1.py'), mock.call('else/file1.py'),
@@ -545,93 +574,20 @@ class TestReactiveBus(unittest.TestCase):
             mock.call('file2.py'), mock.call('else/file1.py'), mock.call('file2.py'),
         ])
 
-    @unittest.skipIf(six.PY2, 'Python3 only')
-    @mock.patch.object(reactive.bus.importlib, 'import_module')
-    def test_load_module_py3(self, import_module):
-        import_module.side_effect = lambda x: x
-        self.assertEqual(reactive.bus._load_module('/x/reactive',
-                                                   '/x/reactive/file1.py'),
-                         'reactive.file1')
-        import_module.assert_called_once_with('reactive.file1')
-
-        import_module.reset_mock()
-        mod = reactive.bus._load_module('/x/hooks/relations',
-                                        '/x/hooks/relations/iface/role.py')
-        self.assertEqual(mod, 'relations.iface.role')
-        import_module.assert_called_once_with('relations.iface.role')
-
-        import_module.reset_mock()
-        mod = reactive.bus._load_module('/x/hooks/reactive',
-                                        '/x/hooks/reactive/sub/__init__.py')
-        self.assertEqual(mod, 'reactive.sub')
-        import_module.assert_called_once_with('reactive.sub')
-
-    def test_load_module_really(self):
-        # Look Ma, no mocks!
-        here = os.path.dirname(__file__)
-        root_path = os.path.join(here, 'data')
-
-        # Path manipulation normally done by bus.discover()
-        ext_path = [root_path, os.path.join(root_path, 'hooks')]
-        with extended_sys_path(ext_path):
-            top_mod = reactive.bus._load_module(os.path.join(root_path,
-                                                            'reactive'),
-                                                os.path.join(root_path,
-                                                            'reactive',
-                                                            'top_level.py'))
-            sub_mod = reactive.bus._load_module(os.path.join(root_path,
-                                                            'reactive'),
-                                                os.path.join(root_path,
-                                                            'reactive',
-                                                            'nested',
-                                                            'nested.py'))
-            hyp_mod = reactive.bus._load_module(os.path.join(root_path,
-                                                            'hooks',
-                                                            'relations'),
-                                                os.path.join(root_path,
-                                                            'hooks',
-                                                            'relations',
-                                                            'hyphen-ated',
-                                                            'peer.py'))
-
-        self.assertEqual(top_mod.test_marker, 'top level')
-        self.assertEqual(sub_mod.test_marker, 'nested')
-        self.assertEqual(hyp_mod.test_marker, 'hyphenated-relation')
-
-        if six.PY3:
-            self.assertIn('reactive.top_level', sys.modules)
-            self.assertIn('reactive.nested.nested', sys.modules)
-            self.assertIs(top_mod, sys.modules['reactive.top_level'])
-            self.assertIs(sub_mod, sys.modules['reactive.nested.nested'])
-
     @mock.patch.object(reactive.bus.ExternalHandler, 'register')
     @mock.patch.object(reactive.bus.os, 'access')
     @mock.patch.object(reactive.bus, '_load_module')
     def test_register_handlers_from_file(self, _load_module, access, register):
-        reactive.bus._register_handlers_from_file('reactive',
-                                                  'reactive/foo.py')
-        _load_module.assert_called_once_with('reactive',
-                                             'reactive/foo.py')
+        reactive.bus._register_handlers_from_file('reactive/foo.py')
+        _load_module.assert_called_once_with('reactive/foo.py')
         access.return_value = True
-        reactive.bus._register_handlers_from_file('reactive', 'reactive/foo')
+        reactive.bus._register_handlers_from_file('reactive/foo')
         access.assert_called_once_with('reactive/foo', os.X_OK)
         register.assert_called_once_with('reactive/foo')
 
         register.reset_mock()
-        reactive.bus._register_handlers_from_file(
-                'hooks/relations', 'hooks/relations/foo/README.md')
+        reactive.bus._register_handlers_from_file('hooks/relations/foo/README.md')
         assert not register.called
-
-
-@contextmanager
-def extended_sys_path(extras_list):
-    extras_list = [p for p in extras_list if p not in sys.path]
-    sys.path.extend(extras_list)
-    try:
-        yield
-    finally:
-        for p in extras_list:
-            sys.path.remove(p)
 
 
 if __name__ == '__main__':

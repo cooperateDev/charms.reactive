@@ -18,9 +18,6 @@ from charms.reactive import when
 from charms.reactive import set_state
 
 
-test_marker = 'nested'
-
-
 @when('test')
 def nested():
     set_state('nested')

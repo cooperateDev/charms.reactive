@@ -22,9 +22,6 @@ from charms.reactive import remove_state
 from charms.reactive.helpers import any_states
 
 
-test_marker = 'top level'
-
-
 @when('test')
 def top_level():
     if any_states('top-level'):
